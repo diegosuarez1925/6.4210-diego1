@@ -2,6 +2,7 @@
 ## Code for nobody but Python to read
 ######################################################################
 
+from curses.ascii import ctrl
 import sys
 from pathlib import Path
 
@@ -287,6 +288,7 @@ def Constant(c: ArrayLike) -> DTVectorSystem:
         0, 0, len(c), lambda s, inp: s, lambda s, inp: np.array(c), name="Constant"
     )
 
+
 def PDController(
     dim: int, set_point: ArrayLike, gain: float = 1, d_gain: float = 1, dt: float = 0.01
 ) -> DTVectorSystem:
@@ -338,16 +340,47 @@ def feedback_composition(a: System, b: System) -> Diagram:
     Feedback composition of two systems.
     Takes in two systems, and returns a Diagram.
     """
-    raise NotImplementedError("your code here")
+    builder = DiagramBuilder()
+    asys = builder.AddSystem(a)
+    bsys = builder.AddSystem(b)
+    builder.Connect(asys.get_output_port(), bsys.get_input_port()) #link a's output to b's input
+    builder.Connect(bsys.get_output_port(), asys.get_input_port()) #link b's output to a's input
+    # log each system's output with a name that includes the system's name
+    for s in (asys, bsys):
+        logger = LogVectorOutput(s.get_output_port(), builder)
+        logger.set_name(f"log_{s.get_name()}")
+    return builder.Build()
 
 
-def Body1D(mass: float = 1, dt: float = 1) -> DTVectorSystem:
-    """
-    Point mass under a force input.  State is (position, velocity); only the
-    position is output.
-    Takes in mass and dt, and returns a DTVectorSystem.
-    """
-    raise NotImplementedError("your code here")
+def Body1D(mass: float = 1, dt: float = 1) -> DTVectorSystem: 
+
+    def next_state_fun(s, inp):
+        """
+        State is [position, velocity], input is [force].
+        The new 
+        """
+        x, v = s
+        force = inp[0]
+        new_x = x + v * dt
+        new_v = v + force / mass * dt   #v' = v + a*dt
+        return np.array([new_x, new_v])
+
+    def output_fun(s, inp):
+        """
+        State is [position, velocity], input is [force].
+        Outputs are just the position, so returns [position].
+        """
+        return np.array([s[0]])
+
+    return DTVectorSystem(
+        input_d=1,                          # Input is just force (dim = 1)
+        state_d=2,                          # State is position and velocity (dim = 2)
+        output_d=1,                         # Output is just position (dim = 1)
+        next_state_fun=next_state_fun,      # Function to compute next state
+        output_fun=output_fun,              # Function to compute output
+        dt=dt,
+        name="Body1D"
+    )
 
 
 def PController(dim: int, set_point: ArrayLike, gain: float = 1) -> DTVectorSystem:
@@ -357,7 +390,25 @@ def PController(dim: int, set_point: ArrayLike, gain: float = 1) -> DTVectorSyst
     Takes in the dimension, the set point, and the gain, and returns a
     stateless DTVectorSystem.
     """
-    raise NotImplementedError("your code here")
+
+    set_point = np.asarray(set_point, dtype=float)  # Ensure set_point is a numpy array
+
+    def output_fun(s, inp):
+        """
+        Computes the output of the PController.
+        Proportional control law: output = gain * (target_pos - pos)
+        """
+        return gain * (set_point - inp)
+
+    return DTVectorSystem(
+        input_d=dim,                        # Input dimension given by PController's dim
+        state_d=0,                          # No state, so 0 dim
+        output_d=dim,                       # Force has same dimension as position
+        next_state_fun=None,                # No state, so no update function
+        output_fun=output_fun,              # Function to compute output
+        output_depends_on_input=True,         
+        name="PController"
+    )
 
 
 def Observer(d_in: int, indices: Sequence[int]) -> DTVectorSystem:
@@ -418,6 +469,74 @@ def main0(init_val: float = 0) -> None:
     plot_log(diagram, simulator, "log_Counter")
 
 
+# by yours truely
+def main1(force: float = 1.0, x0: float = 0.0, v0: float = 0.0) -> None:
+    """
+    Push a Body1D with a constant force and log its position.
+    """
+    builder = DiagramBuilder()
+    source = builder.AddSystem(Constant([force]))
+    body = builder.AddSystem(Body1D(mass=2, dt=0.1))
+    builder.Connect(source.get_output_port(), body.get_input_port())
+
+    logger = LogVectorOutput(body.get_output_port(), builder)
+    logger.set_name("log_Body1D")
+    diagram = builder.Build()
+
+    if not HEADLESS:
+        plt.figure(figsize=(12, 6))
+        plot_system_graphviz(diagram)
+        plt.show()
+
+    # Constant has no state, so Body1D's state is the only discrete state group.
+    s0 = [[x0, v0]]
+    simulator = simulate(diagram, s0, T=1.0)
+    print("final state (x, v):", get_state(body, simulator))
+    plot_log(diagram, simulator, "log_Body1D")
+
+def main2() -> None:
+    """
+    7.2: push a Body1D with a constant 0.1 N force for 5 steps.
+    """
+    body = Body1D(mass=2, dt=0.1)
+    diagram = series_composition(Constant([0.1]), body)
+
+    if not HEADLESS:
+        plt.figure(figsize=(12, 6))
+        plot_system_graphviz(diagram)
+        plt.show()
+
+    s0 = [[0.0, 0.0]]   # only Body1D has state
+    simulator = simulate(diagram, s0, T=0.5)
+    print("final state (x, v):", get_state(body, simulator))
+    plot_log(diagram, simulator, "log_Body1D")
+
+def main3() -> None:
+    ctrl = PController(dim=1, set_point=[1.0], gain=10)
+    print(ctrl.output_fun(np.zeros(0), np.array([0.2])))
+
+def main4(gain: float = 10) -> None:
+    """
+    7.4: P controller + Body1D in feedback.
+    """
+    body = Body1D(mass=2, dt=0.1)
+    ctrl = PController(dim=1, set_point=[1.0], gain=gain)
+    diagram = feedback_composition(body, ctrl)
+
+    if not HEADLESS:
+        plt.figure(figsize=(12, 6))
+        plot_system_graphviz(diagram)
+        plt.show()
+
+    s0 = [[0.2, 0.5]]   # only Body1D has state
+    simulator = simulate(diagram, s0, T=10)
+    print("final state (x, v):", get_state(body, simulator))
+    plot_log(diagram, simulator, "log_Body1D")
+
 if __name__ == "__main__":
     # main0_without_logging(4)
-    main0(4)
+    # main0(4)
+    # main1()
+    # main2()
+    # main3()
+    main4()
