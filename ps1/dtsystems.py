@@ -418,7 +418,20 @@ def Observer(d_in: int, indices: Sequence[int]) -> DTVectorSystem:
     Takes in the input dimension and the indices to keep, and returns a
     stateless DTVectorSystem.
     """
-    raise NotImplementedError("your code here")
+    indices = list(indices)
+
+    def output(s, inp):
+        return np.asarray(inp)[indices]
+
+    return DTVectorSystem(
+        d_in,            # input: full plant state
+        0,               # stateless
+        len(indices),    # output: only the selected entries
+        None,
+        output,
+        output_depends_on_input=True,   # output is computed from the input
+        name="Observer",
+    )
 
 
 def SimpleTrajectoryFollower(
@@ -430,7 +443,24 @@ def SimpleTrajectoryFollower(
     keeps track of which waypoint that is; once the input is within epsilon of
     it, move on to the next.
     """
-    raise NotImplementedError("your code here")
+    waypoints = [np.asarray(w, dtype=float) for w in waypoints]
+    dim = len(waypoints[0])
+    last = len(waypoints) - 1
+
+    def next_state(s, inp):
+        i = int(s[0])
+        if i < last and np.linalg.norm(inp - waypoints[i]) < epsilon:
+            i += 1
+        return np.array([float(i)])
+
+    def output(s, inp):
+        return waypoints[int(s[0])]
+
+    return DTVectorSystem(
+        dim, 1, dim, next_state, output,
+        dt=dt,
+        name="SimpleTrajectoryFollower",
+    )
 
 
 def PController2(dim: int, gain: float = 1) -> DTVectorSystem:
@@ -438,8 +468,20 @@ def PController2(dim: int, gain: float = 1) -> DTVectorSystem:
     Like PController, but with two input ports, "target" and "actual"; the
     output is gain * (target - actual).
     """
-    raise NotImplementedError("your code here")
+    def output(s, inp):
+        target, actual = inp          # multi-input: inp is a list, one array per port
+        return gain * (target - actual)
 
+    return DTVectorSystem(
+        [dim, dim],                   # a list of dims -> two input ports
+        0,
+        dim,
+        None,
+        output,
+        output_depends_on_input=True,
+        input_port_name=["target", "actual"],
+        name="PController2",
+    )
 
 ######################################################################
 ### Test rigs

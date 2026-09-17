@@ -11,6 +11,7 @@ from dtsystems import (
     SimpleTrajectoryFollower,
     get_meshcat,
     get_positions,
+    get_state,
     series_composition,
     show_meshcat,
     simulate,
@@ -45,6 +46,7 @@ Q_START = np.array([0, 1.0, 0.3, 0.7, 0, 0, 0])
 # Q_START to Q_START + Q_STEP (a step on joints 1, 2 and 4).
 Q_STEP = np.array([0.5, -0.3, 0, 0.4, 0, 0, 0])
 
+PLANT_DT = 1e-4
 
 def iiwa_s0(q0: np.ndarray) -> list[np.ndarray]:
     """
@@ -142,7 +144,33 @@ def create_IIWA14_diagram_with_pcontroller(
     target q_desired, wired from the plant's state output back into its
     actuation input.
     """
-    raise NotImplementedError("your code here")
+    builder = DiagramBuilder()
+    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=1e-4)
+    parser = Parser(plant, scene_graph)
+    try:
+        parser.AddModelsFromUrl(IIWA14_URL)
+    except RuntimeError as e:
+        explain_model_download_error(e)
+        raise
+    plant.WeldFrames(plant.world_frame(), plant.GetFrameByName("iiwa_link_0"))
+    plant.Finalize()
+
+    observer = builder.AddSystem(Observer(14, range(7)))   # [q, v] -> q
+    controller = builder.AddSystem(PController(7, q_desired, controller_gain))
+
+    builder.Connect(plant.get_state_output_port(), observer.get_input_port())
+    builder.Connect(observer.get_output_port(), controller.get_input_port())
+    builder.Connect(controller.get_output_port(), plant.get_actuation_input_port())
+
+    if meshcat is not None:
+        MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
+
+    logger = LogVectorOutput(plant.get_state_output_port(), builder)
+    logger.set_name("log_plant")
+
+    diagram = builder.Build()
+    diagram.set_name("iiwa with P controller")
+    return diagram, plant
 
 
 def create_IIWA14_diagram_with_pd_controller(
@@ -157,7 +185,35 @@ def create_IIWA14_diagram_with_pd_controller(
     defined in dtsystems.py: controller_gain, damping_gain, and dt go through
     to it.
     """
-    raise NotImplementedError("your code here")
+    builder = DiagramBuilder()
+    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=1e-4)
+    parser = Parser(plant, scene_graph)
+    try:
+        parser.AddModelsFromUrl(IIWA14_URL)
+    except RuntimeError as e:
+        explain_model_download_error(e)
+        raise
+    plant.WeldFrames(plant.world_frame(), plant.GetFrameByName("iiwa_link_0"))
+    plant.Finalize()
+
+    observer = builder.AddSystem(Observer(14, range(7)))
+    controller = builder.AddSystem(
+        PDController(7, q_desired, controller_gain, damping_gain, dt)
+    )
+
+    builder.Connect(plant.get_state_output_port(), observer.get_input_port())
+    builder.Connect(observer.get_output_port(), controller.get_input_port())
+    builder.Connect(controller.get_output_port(), plant.get_actuation_input_port())
+
+    if meshcat is not None:
+        MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
+
+    logger = LogVectorOutput(plant.get_state_output_port(), builder)
+    logger.set_name("log_plant")
+
+    diagram = builder.Build()
+    diagram.set_name("iiwa with PD controller")
+    return diagram, plant
 
 
 def create_IIWA14_diagram_with_waypoints(
@@ -166,6 +222,7 @@ def create_IIWA14_diagram_with_waypoints(
     damping_gain: float = 3000,
     epsilon: float = 0.01,
     meshcat: Meshcat | None = None,
+    ctrl_dt: float = PLANT_DT
 ) -> tuple[Diagram, MultibodyPlant]:
     """
     Drive the arm through a sequence of joint-space waypoints: an Observer
@@ -177,8 +234,128 @@ def create_IIWA14_diagram_with_waypoints(
     waypoint, so this controller must be stiff enough that its gravity sag
     stays well under epsilon.
     """
-    raise NotImplementedError("your code here")
+    builder = DiagramBuilder()
+    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=PLANT_DT)
+    parser = Parser(plant, scene_graph)
+    try:
+        parser.AddModelsFromUrl(IIWA14_URL)
+    except RuntimeError as e:
+        explain_model_download_error(e)
+        raise
+    plant.WeldFrames(plant.world_frame(), plant.GetFrameByName("iiwa_link_0"))
+    plant.Finalize()
+
+    observer = builder.AddSystem(Observer(14, range(7)))
+    follower = builder.AddSystem(SimpleTrajectoryFollower(waypoints, epsilon))
+    controller = builder.AddSystem(
+        PDController2(7, controller_gain, damping_gain, dt=ctrl_dt)
+    )
+
+    builder.Connect(plant.get_state_output_port(), observer.get_input_port())
+    builder.Connect(observer.get_output_port(), follower.get_input_port())
+    builder.Connect(follower.get_output_port(), controller.GetInputPort("target"))
+    builder.Connect(observer.get_output_port(), controller.GetInputPort("actual"))
+    builder.Connect(controller.get_output_port(), plant.get_actuation_input_port())
+
+    if meshcat is not None:
+        MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
+
+    logger = LogVectorOutput(plant.get_state_output_port(), builder)
+    logger.set_name("log_plant")
+
+    diagram = builder.Build()
+    diagram.set_name("iiwa drawing a square")
+    return diagram, plant
+
+
+
+def main1(gain: float = 100, T: float = 10.0) -> None:
+    meshcat = get_meshcat()
+    diagram, plant = create_IIWA14_diagram_with_pcontroller(gain, Q_START, meshcat=meshcat)
+    if not HEADLESS:
+        plt.figure(figsize=(12, 6))
+        plot_system_graphviz(diagram)
+        plt.show()
+    simulator = simulate(diagram, iiwa_s0(Q_START), T)
+    q_final = get_positions(plant, simulator)
+    print(f"   Target joint positions: {Q_START}")
+    print(f"   Final joint positions:  {q_final}")
+    print(f"   Error:                  {Q_START - q_final}")
+    plot_log(diagram, simulator, "log_plant")
+    show_meshcat()
+
+
+def main2(gain: float = 100, d_gain: float = 30,
+                       ctrl_dt: float = PLANT_DT, T: float = 150.0) -> None:
+    meshcat = get_meshcat()
+    q_goal = Q_START + Q_STEP
+    diagram, plant = create_IIWA14_diagram_with_pd_controller(
+        gain, d_gain, q_goal, dt=ctrl_dt, meshcat=meshcat
+    )
+    if not HEADLESS:
+        plt.figure(figsize=(12, 6))
+        plot_system_graphviz(diagram)
+        plt.show()
+
+    # group 0 = plant [q, v]; group 1 = PD controller's "previous position"
+    s0 = iiwa_s0(Q_START) + [Q_START.copy()]
+    simulator = simulate(diagram, s0, T)
+
+    q_final = get_positions(plant, simulator)
+    print(f"   Goal:        {q_goal}")
+    print(f"   Final:       {q_final}")
+    print(f"   Final error: {q_goal - q_final}")
+
+    log = diagram.GetSubsystemByName("log_plant").FindLog(simulator.get_context())
+    t, d = log.sample_times(), log.data()
+    speed = np.linalg.norm(d[7:].T, axis=1)      # joint-velocity magnitude
+    tol = 1e-3
+    moving = speed > tol
+    if moving[-1]:
+        print("   Still moving at the end of the run: increase T")
+    else:
+        print(f"   At rest (|v| < {tol}) after t = {t[np.nonzero(moving)[0][-1] + 1]:.2f} s")
+
+    plot_log(diagram, simulator, "log_plant")
+    show_meshcat()
+
+
+def main3(T: float = 20.0, ctrl_dt: float =1e-2) -> None:
+    meshcat = get_meshcat()
+    diagram, plant = create_IIWA14_diagram_with_waypoints(
+        SQUARE_IIWA, meshcat=meshcat, ctrl_dt=ctrl_dt
+    )
+    follower = diagram.GetSubsystemByName("SimpleTrajectoryFollower")
+    if not HEADLESS:
+        plt.figure(figsize=(12, 6))
+        plot_system_graphviz(diagram)
+        plt.show()
+
+    q0 = SQUARE_IIWA[0]
+    # group 0 = plant, group 1 = follower (waypoint index), group 2 = PD's previous position
+    s0 = iiwa_s0(q0) + [np.array([0.0]), q0.copy()]
+    simulator = simulate(diagram, s0, T)
+
+    log = diagram.GetSubsystemByName("log_plant").FindLog(simulator.get_context())
+    t, q = log.sample_times(), log.data()[:7]
+    wp = SQUARE_IIWA[1]
+    err = np.linalg.norm(q.T - wp, axis=1)
+    last = t > t[-1] - 1.0
+    print(f"   closest to waypoint 1: {err.min():.4f} at t = {t[err.argmin()]:.2f} s (need < 0.01)")
+    print(f"   error over last 1 s:   mean {err[last].mean():.4f}, wiggle (std) {err[last].std():.2e}")
+    print(f"   per-joint error at end: {np.round(wp - q[:, -1], 4)}")
+
+    idx = int(get_state(follower, simulator)[0])
+    print(f"   Waypoint reached: {idx} of {len(SQUARE_IIWA) - 1}")
+    print(f"   Final error:      {SQUARE_IIWA[-1] - get_positions(plant, simulator)}")
+    plot_log(diagram, simulator, "log_plant")
+    show_meshcat()
 
 
 if __name__ == "__main__":
-    test_const_torque(Q_START, np.zeros(7))     # zero torque
+    # test_const_torque(Q_START, np.zeros(7))     # zero torque
+    # main1()
+    # main2()
+    for cdt in (1e-3, 1e-2):
+        print(f"\n=== ctrl_dt = {cdt}")
+        main3(ctrl_dt=cdt)
